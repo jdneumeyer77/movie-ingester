@@ -1,0 +1,32 @@
+Basic model:
+
+ProudctionCompanyDetails:
+- Id
+- name
+- date (year-month)
+- budget
+- revenue
+- profit
+- avgPopularity
+- metadata: 
+  - GenresIds
+  - MovieIds
+
+MovieGenreDetails:
+- Id
+- Name
+- date (year-month)
+- avgPopularity
+- budget
+- revenue
+- profit
+- metadata
+  - ProductionCompanyIds
+  - MovieIds
+
+
+laid out in the following ways:
+
+output/aggregates/prodcompanies/$year/$month.json
+output/aggregates/genres/$year/$month.json
+output/aggregates/lastrun.json
