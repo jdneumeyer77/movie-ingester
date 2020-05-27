@@ -27,6 +27,6 @@ MovieGenreDetails:
 
 laid out in the following ways:
 
-output/aggregates/prodcompanies/$year/$month.json
-output/aggregates/genres/$year/$month.json
-output/aggregates/lastrun.json
+output/prodcompanies/$year/$month.json
+output/genres/$year/$month.json
+output/lastrun.json
