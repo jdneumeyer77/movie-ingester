@@ -16,8 +16,8 @@ object Main extends App {
 
   val DTYearMonthFormat = DateTimeFormatter.ofPattern("yyyy-MM")
 
-  val (inputFile: String, optionalLastRun: Option[LocalDate]) = args.length match {
-    case a if a == 2 => (args(0), Option(args(1)).map(DTYearMonthFormat.parse))
+  val (inputFile, optionalLastRun) = args.length match {
+    case a if a == 2 => (args(0), Option(args(1)).map(LocalDate.parse(_, DTYearMonthFormat)))
     case a if a == 1 => (args(0), Option.empty[LocalDate])
     case _ =>
       println(s"Invalid number of args! [lastrun:YYYY-MM]")
@@ -90,10 +90,10 @@ object IngestModel {
     // seriously who embeds json  in a csv file??!
     // delay parsing the json as it's expensive and the row may be filtered out.
     lazy val genreIds: Set[String] = Try(
-      Json.parse(genreIdsJson).as[List[JsObject]].map((_ \ "id").as[String]).toSet
+      Json.parse(genreIdsJson).as[List[JsObject]].map(x => (x \ "id").as[String]).toSet
     ).getOrElse(Set.empty)
     lazy val productionCompanyIds: Set[String] = Try(
-      Json.parse(genreIdsJson).as[List[JsObject]].map((_ \ "id").as[String]).toSet
+      Json.parse(genreIdsJson).as[List[JsObject]].map(x => (x \ "id").as[String]).toSet
     ).getOrElse(Set.empty)
 
     def toPrudctionCompanies: Iterable[OutputModels.ProductionCompanyDetails] = {
