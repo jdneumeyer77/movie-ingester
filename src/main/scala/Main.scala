@@ -16,65 +16,72 @@ object Main extends App {
 
   val DTYearMonthFormat = DateTimeFormatter.ofPattern("yyyy-MM")
 
+  println(args.length)
+
   val (inputFile, optionalLastRun) = args.length match {
-    case a if a == 2 => (args(0), Option(args(1)).map(LocalDate.parse(_, DTYearMonthFormat)))
-    case a if a == 1 => (args(0), Option.empty[LocalDate])
+    case a if a == 2 =>
+      (args(0), Option(args(1)).map(LocalDate.parse(_, DTYearMonthFormat)).getOrElse(LocalDate.MIN))
+    case a if a == 1 => (args(0), LocalDate.MIN)
     case _ =>
       println(s"Invalid number of args! [lastrun:YYYY-MM]")
       System.exit(666)
-      ("", Option.empty[LocalDate]) // so the compiler doesn't complain
+      ("", LocalDate.MIN) // so the compiler doesn't complain
   }
 
   val input = File.apply(inputFile)
   if (!input.exists || !input.isReadable) {
     println(s"Cannot read file: ${input.name}")
     System.exit(666)
+  } else {
+    println(s"Processing file ${input.name}")
   }
 
   import IngestModel._
   val reader = input.uri.asCsvReader[MovieRow](
-    rfc.withHeader(
-      "budget",
-      "genres",
-      "id",
-      "popularity",
-      "production_companies",
-      "release_date",
-      "revenue"
-    )
+    rfc.withHeader(true)
   )
+
+  if (!optionalLastRun.isEqual(LocalDate.MIN))
+    println(s"Filtering everything before ${optionalLastRun}")
+
+  def toKeep(movie: MovieRow): Boolean = {
+    movie.release.isAfter(optionalLastRun) &&
+    movie.status.equalsIgnoreCase("released") &&
+    movie.revenue > 0 // missing, not reported revenue? excludes a lot of movies in the test set.
+  }
 
   // lazy iterator; will not consume entire thing into memory.
   // We coul easily wrap this as Akka Streams Source to introduce buffering and enhacing the data using external means (imbd, internal db, http call, etc.)
   val results = reader
     .collect {
       // Based on the last run or a specified date to filter on, i.e. only collect this months results if after a full run is done.
-      // further filter can be done here to speed up the ingestion.
-      case Right(x) if optionalLastRun.exists(lastRun => lastRun.isAfter(x.release)) => x
+      // further filter can be done here to speed up the ingestion such as eliminating planned or cancelled movies.
+      case Right(movie) if toKeep(movie) => movie
     }
     .foldLeft(OutputModels.DetailCollector()) {
       case (acc, nextRow) => acc.accept(nextRow)
     }
 
-  val outputDir = file"./output"
+  results.stats()
+
+  val outputDir = file"./output/"
   results.output(outputDir)
 }
 
 object IngestModel {
   import collection.immutable.Map
 
-  implicit val movieRowDecoder: RowDecoder[MovieRow] = RowDecoder.ordered {
-    (
-        budget: Long,
-        genres: String,
-        id: String,
-        popularity: Double,
-        productionCompanies: String,
-        release: LocalDate,
-        revenue: Long
-    ) =>
-      MovieRow(id, genres, productionCompanies, release, budget, revenue, popularity)
-  }
+  implicit val movieRowDecoder: HeaderDecoder[MovieRow] =
+    HeaderDecoder.decoder(
+      "id",
+      "genres",
+      "production_companies",
+      "release_date",
+      "budget",
+      "revenue",
+      "popularity",
+      "status"
+    )(MovieRow.apply _)
 
   case class MovieRow(
       movieId: String,
@@ -83,17 +90,23 @@ object IngestModel {
       release: LocalDate,
       budget: Long,
       revenue: Long,
-      avgPopulatarity: Double
+      avgPopulatarity: Double,
+      status: String
   ) {
-    val profile = revenue - budget
+    val profit = revenue - budget
 
     // seriously who embeds json  in a csv file??!
     // delay parsing the json as it's expensive and the row may be filtered out.
     lazy val genreIds: Set[String] = Try(
-      Json.parse(genreIdsJson).as[List[JsObject]].map(x => (x \ "id").as[String]).toSet
-    ).getOrElse(Set.empty)
+      (Json.parse(genreIdsJson.replace("'", "\"")) \\ "id").map(_.as[Int].toString).toSet
+    ).getOrElse {
+      Set.empty
+    }
+
     lazy val productionCompanyIds: Set[String] = Try(
-      Json.parse(genreIdsJson).as[List[JsObject]].map(x => (x \ "id").as[String]).toSet
+      (Json.parse(productionCompanyIdsJson.replace("'", "\"")) \\ "id")
+        .map(_.as[Int].toString)
+        .toSet
     ).getOrElse(Set.empty)
 
     def toPrudctionCompanies: Iterable[OutputModels.ProductionCompanyDetails] = {
@@ -103,7 +116,7 @@ object IngestModel {
           id,
           release,
           budget,
-          profit = budget,
+          profit,
           revenue,
           avgPopulatarity,
           metadata
@@ -115,7 +128,7 @@ object IngestModel {
       val metadata = OutputModels.GenreDetailsMetadata(Set(movieId), genreIds)
       genreIds.map(id =>
         OutputModels
-          .GenreDetails(id, release, budget, profit = budget, revenue, avgPopulatarity, metadata)
+          .GenreDetails(id, release, budget, profit, revenue, avgPopulatarity, metadata)
       )
     }
   }
@@ -215,6 +228,7 @@ object OutputModels {
     }
   }
 
+  // TODO: accepts movieRow, but split out collectors.
   case class DetailCollector(
       moviesSeen: Int = 0,
       genresDetails: GenreDetailsMap = newGenreDetailsMap,
@@ -237,25 +251,33 @@ object OutputModels {
       )
     }
 
+    def stats(): Unit = {
+      println(s"Total movies seen: $moviesSeen")
+      // println(s"genres years: ${genresDetails}")
+    }
+
     // For simplicity just output in json. It could easily be in Parquet, SQLite db, etc.
     // Parquet might be the best if we add a lot more columns orthe next step does further analytics, or want to append a month.
+    // TODO: format dates YYYY-MM
     def outputDetailsJson[A: Writes](outputPath: File, details: BucketedYearFlattened[A]) = {
       details.foreach {
         case (year, months) =>
-          val yearDir = (outputPath / year.toString).createIfNotExists(true)
+          val yearDir = (outputPath / year.toString)
 
           months.zipWithIndex.foreach {
             case (v, idx) =>
               val file = yearDir / s"$year-${(idx + 1)}.json"
+
+              //  println(s"writing file ${file.name}")
               val asJson = Json.arr(v.map(Json.toJson[A]))
-              file.writeByteArray(Json.toBytes(asJson))
+              file.createFileIfNotExists(true).writeByteArray(Json.toBytes(asJson))
           }
       }
     }
 
     def output(outputPath: File) = {
 
-      val out = outputPath.createIfNotExists(true)
+      val out = outputPath
 
       val genresOut = out / "genres"
       val prodCompanyOut = out / "productionCompanies"
